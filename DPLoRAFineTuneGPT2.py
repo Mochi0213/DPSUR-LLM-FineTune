@@ -5,6 +5,7 @@ from datasets import load_dataset
 from utils.dp_optimizer import DPAdam_Optimizer
 from utils.sampling import get_data_loaders_possion
 from peft import get_peft_model, LoraConfig, TaskType
+from privacy_analysis.RDP.compute_dp_sgd import apply_dp_sgd_analysis
 
 parser = argparse.ArgumentParser()
 
@@ -12,7 +13,7 @@ parser.add_argument('--output_dir', type=str, default="./model")
 
 parser.add_argument('--lr', type=float, default=1e-3)
 parser.add_argument('--momentum', type=float, default=0.9)
-parser.add_argument('--iter', type=int, default=500)
+# parser.add_argument('--iter', type=int, default=500)
 
 parser.add_argument('--sigma', type=float, default=0.1)
 parser.add_argument('--C', type=float, default=0.1)
@@ -20,7 +21,8 @@ parser.add_argument('--epsilon', type=float, default=3.0)
 parser.add_argument('--delta', type=float, default=1e-5)
 parser.add_argument('--batch_size', type=int, default=10)
 parser.add_argument('--device', type=str, default='cuda',choices=['cpu', 'cuda'])
-parser.add_argument('--model', type=str, default='gpt2-large', choices = ['distilgpt2', 'gpt2-large'])
+parser.add_argument('--model', type=str, default='distilgpt2', choices = ['distilgpt2', 'gpt2-large'])
+parser.add_argument('--algorithm', type=str, default='DPSGD', choices=['DPSGD', 'DPSUR'])
 args = parser.parse_args()
 ###
 dataset = load_dataset("text", data_files="processed_data.txt")
@@ -91,8 +93,13 @@ train_dataset = WrappedDataset(train_dataset)
 
 least_loss = 99999.0
 least_loss_dir = './least_loss_model'
+orders = [1 + x / 10.0 for x in range(1, 100)] + list(range(11, 64))+ [128, 256, 512]
+iter = 1
+epsilon = 0.0
 
-for i in range(args.iter):
+while epsilon < args.epsilon:
+    
+    epsilon, best_alpha = apply_dp_sgd_analysis(args.batch_size / len(train_dataset), args.sigma, iter, orders, args.delta) #comupte privacy cost
     train_dl = minibatch_loader(train_dataset)
     model.train()
     loss = 0.0
@@ -127,7 +134,8 @@ for i in range(args.iter):
         # model.save_pretrained(least_loss_dir)
         # tokenizer.save_pretrained(least_loss_dir)
 
-    print(f'iters:{i}, |'f' Average loss: {loss:.4f}')
+    print(f'iters:{iter}, 'f'epsilon:{epsilon:.4f} |'f' Average loss: {loss:.4f}')
+    iter+=1
 
 
 model.save_pretrained("fine_tuned_gpt2_dp_lora")
