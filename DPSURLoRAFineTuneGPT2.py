@@ -8,6 +8,9 @@ from peft import get_peft_model, LoraConfig, TaskType
 from privacy_analysis.RDP.compute_dp_sgd import apply_dp_sgd_analysis
 from privacy_analysis.RDP.rdp_convert_dp import compute_eps
 from privacy_analysis.RDP.compute_rdp import compute_rdp
+import numpy as np
+import copy
+
 parser = argparse.ArgumentParser()
 
 parser.add_argument('--output_dir', type=str, default="./model")
@@ -234,11 +237,27 @@ elif args.algorithm == 'DPSUR':
 
         with torch.no_grad():
             for id, batch in enumerate(valid_dl):
-                output = model(**batch)
-                valid_loss += torch.nn.functional.cross_entropy(output, target, reduction='sum')
+                outputs = model(**batch)
+                labels = batch['input_ids'][:, 1:, ]
+                logits = outputs.logits[:, :-1, :].permute(0, 2, 1)
+                valid_loss += torch.nn.functional.cross_entropy(logits, labels, reduction='none').mean(dim=1).mean()
 
-                num_examples += len(data)
-        test_loss /= num_examples
+                # num_examples += len(data)
+        deltaE = valid_loss - last_valid_loss
+        deltaE = np.clip(deltaE, -args.C_v, args.C_v) 
+        deltaE_after_dp = 2*args.C_v*args.sigma_v*np.normal(0,1)+deltaE
+        print("Delta E after dp:",deltaE_after_dp)
+        if deltaE_after_dp < args.beta*args.C_v:
+            last_valid_loss = valid_loss
+            last_model = copy.deepcopy(model)
+            t += 1
+            print("accept updates, the number of updates t:", format(t))
+        else:
+            print("reject updates")
+            model.load_state_dict(last_model.state_dict(), strict=True)
+
+        print(f'iters:{iter}, 'f'epsilon:{epsilon:.4f} |'f' Average loss: {loss:.4f}')
+        iter+=1
 
 model.save_pretrained("fine_tuned_gpt2_dp_lora")
 tokenizer.save_pretrained("fine_tuned_gpt2_dp_lora")
