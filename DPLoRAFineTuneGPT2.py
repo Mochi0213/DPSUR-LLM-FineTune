@@ -122,7 +122,15 @@ while epsilon < args.epsilon:
             output = model(**sample)
             labels = sample['input_ids'][:, 1:, ]
             logits = output.logits[:, :-1, :].permute(0, 2, 1)
-            sample_loss = torch.nn.functional.cross_entropy(logits, labels, reduction="none").mean(dim=1)
+            # sample_loss = torch.nn.functional.cross_entropy(logits, labels, reduction="none").mean(dim=1)
+            
+            ### update sample loss caculation
+            attention_mask = sample["attention_mask"][:, 1:]
+            token_losses = torch.nn.functional.cross_entropy(logits, labels, reduction="none")
+            masked_losses = token_losses * attention_mask
+            sample_loss = masked_losses.sum(dim=1) / attention_mask.sum(dim=1)
+            ###            
+            
             sample_loss.backward()
             loss += sample_loss.item()
             optimizer.microbatch_step()

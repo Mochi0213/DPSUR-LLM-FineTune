@@ -144,7 +144,16 @@ if args.algorithm == 'DPSGD':
                 output = model(**sample)
                 labels = sample['input_ids'][:, 1:, ]
                 logits = output.logits[:, :-1, :].permute(0, 2, 1)
-                sample_loss = torch.nn.functional.cross_entropy(logits, labels, reduction="none").mean(dim=1)
+
+                # sample_loss = torch.nn.functional.cross_entropy(logits, labels, reduction="none").mean(dim=1)
+                
+                ### update sample loss caculation
+                attention_mask = sample["attention_mask"][:, 1:]
+                token_losses = torch.nn.functional.cross_entropy(logits, labels, reduction="none")
+                masked_losses = token_losses * attention_mask
+                sample_loss = masked_losses.sum(dim=1) / attention_mask.sum(dim=1)
+                ###
+                
                 sample_loss.backward()
                 # print('the sample loss is:', sample_loss.item())
                 loss += sample_loss.item()
@@ -159,7 +168,6 @@ if args.algorithm == 'DPSGD':
 
         print(f'iters:{iter}, 'f'epsilon:{epsilon:.4f} |'f' Average loss: {loss:.4f}')
         iter += 1
-        # exit()
 
 elif args.algorithm == 'DPSUR':
     minibatch_loader_for_train, microbatch_loader_for_train = get_data_loaders_possion(
@@ -204,7 +212,15 @@ elif args.algorithm == 'DPSUR':
                 output = model(**sample)
                 labels = sample['input_ids'][:, 1:, ]
                 logits = output.logits[:, :-1, :].permute(0, 2, 1)
-                sample_loss = torch.nn.functional.cross_entropy(logits, labels, reduction="none").mean(dim=1)
+                # sample_loss = torch.nn.functional.cross_entropy(logits, labels, reduction="none").mean(dim=1)
+                
+                ### update sample loss caculation
+                attention_mask = sample["attention_mask"][:, 1:]
+                token_losses = torch.nn.functional.cross_entropy(logits, labels, reduction="none")
+                masked_losses = token_losses * attention_mask
+                sample_loss = masked_losses.sum(dim=1) / attention_mask.sum(dim=1)
+                ###
+                
                 sample_loss.backward()
                 train_loss += sample_loss.item()
                 optimizer.microbatch_step()
@@ -214,14 +230,11 @@ elif args.algorithm == 'DPSUR':
 
         ###vailid
         model.eval()
-        num_examples = 0
         valid_loss = 0
-        correct = 0
 
         with torch.no_grad():
-            for id, batch in valid_dl:
+            for id, batch in enumerate(valid_dl):
                 output = model(**batch)
-
                 valid_loss += torch.nn.functional.cross_entropy(output, target, reduction='sum')
 
                 num_examples += len(data)
