@@ -15,7 +15,7 @@ parser.add_argument('--lr', type=float, default=1e-3)
 parser.add_argument('--momentum', type=float, default=0.9)
 # parser.add_argument('--iter', type=int, default=500)
 
-parser.add_argument('--sigma', type=float, default=0.1)
+parser.add_argument('--sigma', type=float, default=1.23)
 parser.add_argument('--C', type=float, default=0.1)
 parser.add_argument('--epsilon', type=float, default=3.0)
 parser.add_argument('--delta', type=float, default=1e-5)
@@ -110,9 +110,9 @@ while epsilon < args.epsilon:
         for iid in range(batch_len):
             optimizer.zero_microbatch_grad()
 
-            input_ids_sample = batch["input_ids"][0]
-            attention_mask_sample = batch["attention_mask"][0]
-            labels_sample = batch["labels"][0]
+            input_ids_sample = batch["input_ids"][iid]
+            attention_mask_sample = batch["attention_mask"][iid]
+            labels_sample = batch["labels"][iid]
             sample= {
                 "input_ids": input_ids_sample.unsqueeze(0),
                 "attention_mask": attention_mask_sample.unsqueeze(0),
