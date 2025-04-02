@@ -18,20 +18,20 @@ parser.add_argument('--output_dir', type=str, default="./model")
 parser.add_argument('--lr', type=float, default=1e-3)
 parser.add_argument('--momentum', type=float, default=0.9)
 
-parser.add_argument('--batch_size', type=int, default=20)
 parser.add_argument('--device', type=str, default='cuda', choices=['cpu', 'cuda'])
 parser.add_argument('--model', type=str, default='distilgpt2', choices=['distilgpt2', 'gpt2-large'])
-parser.add_argument('--algorithm', type=str, default='DPSUR', choices=['DPSGD', 'DPSUR'])
+parser.add_argument('--algorithm', type=str, default='DPSGD', choices=['DPSGD', 'DPSUR'])
 
 ### DP Parameters
-parser.add_argument('--sigma_t', type=float, default=1.23)
+parser.add_argument('--batch_size', type=int, default=20)
+parser.add_argument('--sigma_t', type=float, default=1.25)
 parser.add_argument('--C_t', type=float, default=0.1)
-parser.add_argument('--epsilon', type=float, default=1.5)
+parser.add_argument('--epsilon', type=float, default=1.0)
 parser.add_argument('--delta', type=float, default=1e-5)
 
-parser.add_argument('--sigma_v', type=float, default=1.5)
+parser.add_argument('--sigma_v', type=float, default=2.0)
 parser.add_argument('--C_v', type=float, default=0.001)
-parser.add_argument('--bs_valid', type=int, default=20)
+parser.add_argument('--bs_valid', type=int, default=5)
 parser.add_argument('--beta', type=float, default=-1.0)
 ###
 
@@ -115,6 +115,12 @@ if args.algorithm == 'DPSGD':
         iterations=1,
         collate_fn=data_collator
     )
+    minibatch_loader_for_test, microbatch_loader_for_test = get_data_loaders_possion(
+        minibatch_size=40,
+        microbatch_size=1,
+        iterations=1,
+        collate_fn=data_collator
+    )
     while epsilon < args.epsilon:
 
         epsilon, best_alpha = apply_dp_sgd_analysis(args.batch_size / len(train_dataset), args.sigma_t, iter, orders,
@@ -157,14 +163,26 @@ if args.algorithm == 'DPSGD':
                 loss += sample_loss.item()
                 optimizer.microbatch_step()
             optimizer.step_dp()
-        loss /= batch_len
+        # loss /= batch_len
 
-        if loss < least_loss:
-            least_loss = loss
-            # model.save_pretrained(least_loss_dir)
-            # tokenizer.save_pretrained(least_loss_dir)
+        # if loss < least_loss:
+        #     least_loss = loss
+        #     # model.save_pretrained(least_loss_dir)
+        #     # tokenizer.save_pretrained(least_loss_dir)
+        model.eval()
+        test_dl = minibatch_loader_for_test(train_dataset)
+        test_loss = 0
 
-        print(f'iters:{iter}, 'f'epsilon:{epsilon:.4f} |'f' Average loss: {loss:.4f}')
+        with torch.no_grad():
+            for id, batch in enumerate(test_dl):
+                # print(len(batch['input_ids']))
+                outputs = model(**batch)
+                labels = batch['input_ids'][:, 1:, ]
+                logits= outputs.logits[:, :-1, :].permute(0, 2, 1)
+                test_loss = torch.nn.functional.cross_entropy(logits, labels, reduction='none') \
+                    .mean(dim=1) \
+                    .mean()
+        print(f'iters:{iter}, 'f'epsilon:{epsilon:.4f} |'f' Average loss: {test_loss:.4f}')
         iter += 1
 
 elif args.algorithm == 'DPSUR':
@@ -180,6 +198,12 @@ elif args.algorithm == 'DPSUR':
     )
     minibatch_loader_for_valid, microbatch_loader_for_vaild = get_data_loaders_possion(
         minibatch_size=args.bs_valid,
+        microbatch_size=1,
+        iterations=1,
+        collate_fn=data_collator
+    )
+    minibatch_loader_for_test, microbatch_loader_for_test = get_data_loaders_possion(
+        minibatch_size=40,
         microbatch_size=1,
         iterations=1,
         collate_fn=data_collator
@@ -214,20 +238,20 @@ elif args.algorithm == 'DPSUR':
                 output = model(**sample)
                 labels = sample['input_ids'][:, 1:, ]
                 logits = output.logits[:, :-1, :].permute(0, 2, 1)
-                # sample_loss = torch.nn.functional.cross_entropy(logits, labels, reduction="none").mean(dim=1)
+                sample_loss = torch.nn.functional.cross_entropy(logits, labels, reduction="none").mean(dim=1)
                 
                 ### update sample loss caculation
-                attention_mask = sample["attention_mask"][:, 1:]
-                token_losses = torch.nn.functional.cross_entropy(logits, labels, reduction="none")
-                masked_losses = token_losses * attention_mask
-                sample_loss = masked_losses.sum(dim=1) / attention_mask.sum(dim=1)
+                # attention_mask = sample["attention_mask"][:, 1:]
+                # token_losses = torch.nn.functional.cross_entropy(logits, labels, reduction="none")
+                # masked_losses = token_losses * attention_mask
+                # sample_loss = masked_losses.sum(dim=1) / attention_mask.sum(dim=1)
                 ###
                 
                 sample_loss.backward()
                 train_loss += sample_loss.item()
                 optimizer.microbatch_step()
             optimizer.step_dp()
-        train_loss /= batch_len
+        # train_loss /= batch_len
         ###train
 
         ###vailid
@@ -238,21 +262,21 @@ elif args.algorithm == 'DPSUR':
             for id, batch in enumerate(valid_dl):
                 # print(len(batch['input_ids']))
                 outputs_new = model(**batch)
-                # outputs_last = model(**batch)
+                outputs_last = last_model(**batch)
                 # print(outputs)
                 labels = batch['input_ids'][:, 1:, ]
                 # print(labels)
                 logits_new = outputs_new.logits[:, :-1, :].permute(0, 2, 1)
-                # logits_last = outputs_last.logits[:, :-1, :].permute(0, 2, 1)
+                logits_last = outputs_last.logits[:, :-1, :].permute(0, 2, 1)
                 valid_loss_new = torch.nn.functional.cross_entropy(logits_new, labels, reduction='none')\
                     .mean(dim=1)\
                     .mean()
-                # valid_loss_last = torch.nn.functional.cross_entropy(logits_last, labels, reduction='none') \
-                #     .mean(dim=1) \
-                #     .mean()
+                valid_loss_last = torch.nn.functional.cross_entropy(logits_last, labels, reduction='none') \
+                    .mean(dim=1) \
+                    .mean()
         ###valid
-        # deltaE = valid_loss_new - valid_loss_last
-        deltaE = valid_loss_new - last_valid_loss
+        deltaE = valid_loss_new - valid_loss_last
+        # deltaE = valid_loss_new - last_valid_loss
         deltaE = torch.tensor(deltaE).cpu()
         print("Delta E:", deltaE)
         deltaE = np.clip(deltaE, -args.C_v, args.C_v)
@@ -268,10 +292,21 @@ elif args.algorithm == 'DPSUR':
             print("reject this round's update")
             model.load_state_dict(last_model.state_dict(), strict=True)
 
-        print(f'iters:{iter}, 'f'epsilon:{epsilon:.4f} |'f' Average loss: {train_loss:.4f}')
+        test_loss = 0
+        test_dl = minibatch_loader_for_test(train_dataset)
+        with torch.no_grad():
+            for id, batch in enumerate(test_dl):
+                # print(len(batch['input_ids']))
+                outputs = model(**batch)
+                labels = batch['input_ids'][:, 1:, ]
+                logits= outputs.logits[:, :-1, :].permute(0, 2, 1)
+                test_loss = torch.nn.functional.cross_entropy(logits, labels, reduction='none') \
+                    .mean(dim=1) \
+                    .mean()
+        print(f'iters:{iter}, 'f'epsilon:{epsilon:.4f} |'f' Average loss: {test_loss:.4f}')
         iter+=1
 
-model_save_dir = 'fine_tuned_gpt2_' + args.algorithm +'_'+ args.bs_valid + '_' + args.epsilon + '_' + args.bath_size + '_' + args.sigma_v
+model_save_dir = 'fine_tuned_gpt2_' + args.algorithm +'_'+ str(args.bs_valid) + '_' + str(args.epsilon) + '_' + str(args.batch_size) + '_' + str(args.sigma_v)
 model.save_pretrained(model_save_dir)
 tokenizer.save_pretrained(model_save_dir)
 
