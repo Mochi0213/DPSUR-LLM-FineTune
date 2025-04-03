@@ -11,6 +11,10 @@ from privacy_analysis.RDP.compute_rdp import compute_rdp
 import copy
 import numpy as np
 
+import json
+import os
+from datetime import datetime
+
 parser = argparse.ArgumentParser()
 
 parser.add_argument('--output_dir', type=str, default="./model")
@@ -23,15 +27,17 @@ parser.add_argument('--model', type=str, default='distilgpt2', choices=['distilg
 parser.add_argument('--algorithm', type=str, default='DPSGD', choices=['DPSGD', 'DPSUR'])
 
 ### DP Parameters
-parser.add_argument('--batch_size', type=int, default=20)
-parser.add_argument('--sigma_t', type=float, default=1.25)
-parser.add_argument('--C_t', type=float, default=0.1)
-parser.add_argument('--epsilon', type=float, default=1.0)
-parser.add_argument('--delta', type=float, default=1e-5)
+parser.add_argument('--epsilon', type=float, default=3.0)
 
-parser.add_argument('--sigma_v', type=float, default=2.0)
+parser.add_argument('--batch_size', type=int, default=40)
+parser.add_argument('--bs_valid', type=int, default=10)
+
+parser.add_argument('--sigma_t', type=float, default=1.217)
+parser.add_argument('--sigma_v', type=float, default=1.5)
+
+parser.add_argument('--C_t', type=float, default=0.1)
 parser.add_argument('--C_v', type=float, default=0.001)
-parser.add_argument('--bs_valid', type=int, default=5)
+parser.add_argument('--delta', type=float, default=1e-5)
 parser.add_argument('--beta', type=float, default=-1.0)
 ###
 
@@ -108,6 +114,9 @@ orders = [1 + x / 10.0 for x in range(1, 100)] + list(range(11, 64)) + [128, 256
 iter = 1
 epsilon = 0.0
 
+epsilon_list = []
+loss_list = []
+
 if args.algorithm == 'DPSGD':
     minibatch_loader, microbatch_loader = get_data_loaders_possion(
         minibatch_size=args.batch_size,
@@ -144,7 +153,6 @@ if args.algorithm == 'DPSGD':
                     "attention_mask": attention_mask_sample.unsqueeze(0),
                     "labels": labels_sample.unsqueeze(0),
                 }
-                # print(sample)
                 output = model(**sample)
                 labels = sample['input_ids'][:, 1:, ]
                 logits = output.logits[:, :-1, :].permute(0, 2, 1)
@@ -163,19 +171,12 @@ if args.algorithm == 'DPSGD':
                 loss += sample_loss.item()
                 optimizer.microbatch_step()
             optimizer.step_dp()
-        # loss /= batch_len
-
-        # if loss < least_loss:
-        #     least_loss = loss
-        #     # model.save_pretrained(least_loss_dir)
-        #     # tokenizer.save_pretrained(least_loss_dir)
         model.eval()
         test_dl = minibatch_loader_for_test(train_dataset)
         test_loss = 0
 
         with torch.no_grad():
             for id, batch in enumerate(test_dl):
-                # print(len(batch['input_ids']))
                 outputs = model(**batch)
                 labels = batch['input_ids'][:, 1:, ]
                 logits= outputs.logits[:, :-1, :].permute(0, 2, 1)
@@ -183,10 +184,12 @@ if args.algorithm == 'DPSGD':
                     .mean(dim=1) \
                     .mean()
         print(f'iters:{iter}, 'f'epsilon:{epsilon:.4f} |'f' Average loss: {test_loss:.4f}')
+        epsilon_list.append(epsilon)
+        loss_list.append(test_loss)
         iter += 1
 
 elif args.algorithm == 'DPSUR':
-    t = 0
+    t = 1
     last_valid_loss = 99999.0
 
     last_model = model
@@ -234,7 +237,6 @@ elif args.algorithm == 'DPSUR':
                     "attention_mask": attention_mask_sample.unsqueeze(0),
                     "labels": labels_sample.unsqueeze(0),
                 }
-                # print(sample)
                 output = model(**sample)
                 labels = sample['input_ids'][:, 1:, ]
                 logits = output.logits[:, :-1, :].permute(0, 2, 1)
@@ -251,47 +253,10 @@ elif args.algorithm == 'DPSUR':
                 train_loss += sample_loss.item()
                 optimizer.microbatch_step()
             optimizer.step_dp()
-        # train_loss /= batch_len
         ###train
 
-        ###vailid
         model.eval()
-        valid_loss = 0
-
-        with torch.no_grad():
-            for id, batch in enumerate(valid_dl):
-                # print(len(batch['input_ids']))
-                outputs_new = model(**batch)
-                outputs_last = last_model(**batch)
-                # print(outputs)
-                labels = batch['input_ids'][:, 1:, ]
-                # print(labels)
-                logits_new = outputs_new.logits[:, :-1, :].permute(0, 2, 1)
-                logits_last = outputs_last.logits[:, :-1, :].permute(0, 2, 1)
-                valid_loss_new = torch.nn.functional.cross_entropy(logits_new, labels, reduction='none')\
-                    .mean(dim=1)\
-                    .mean()
-                valid_loss_last = torch.nn.functional.cross_entropy(logits_last, labels, reduction='none') \
-                    .mean(dim=1) \
-                    .mean()
-        ###valid
-        deltaE = valid_loss_new - valid_loss_last
-        # deltaE = valid_loss_new - last_valid_loss
-        deltaE = torch.tensor(deltaE).cpu()
-        print("Delta E:", deltaE)
-        deltaE = np.clip(deltaE, -args.C_v, args.C_v)
-        deltaE_after_dp = 2*args.C_v*args.sigma_v*np.random.normal(0,1)+deltaE
-        print("Delta E after dp:",deltaE_after_dp)
-        # exit()
-        if deltaE_after_dp < args.beta*args.C_v:
-            last_valid_loss = valid_loss_new
-            last_model = copy.deepcopy(model)
-            t += 1
-            print("accept this round's update, the number of total accepted updates is:", format(t))
-        else:
-            print("reject this round's update")
-            model.load_state_dict(last_model.state_dict(), strict=True)
-
+        ###test
         test_loss = 0
         test_dl = minibatch_loader_for_test(train_dataset)
         with torch.no_grad():
@@ -303,11 +268,66 @@ elif args.algorithm == 'DPSUR':
                 test_loss = torch.nn.functional.cross_entropy(logits, labels, reduction='none') \
                     .mean(dim=1) \
                     .mean()
+        ###test
         print(f'iters:{iter}, 'f'epsilon:{epsilon:.4f} |'f' Average loss: {test_loss:.4f}')
+
+        ###vailid
+        valid_loss = 0
+        with torch.no_grad():
+            for id, batch in enumerate(valid_dl):
+                outputs_new = model(**batch)
+                outputs_last = last_model(**batch)
+                labels = batch['input_ids'][:, 1:, ]
+                logits_new = outputs_new.logits[:, :-1, :].permute(0, 2, 1)
+                logits_last = outputs_last.logits[:, :-1, :].permute(0, 2, 1)
+                valid_loss_new = torch.nn.functional.cross_entropy(logits_new, labels, reduction='none')\
+                    .mean(dim=1)\
+                    .mean()
+                valid_loss_last = torch.nn.functional.cross_entropy(logits_last, labels, reduction='none') \
+                    .mean(dim=1) \
+                    .mean()
+        ###valid
+        deltaE = valid_loss_new - valid_loss_last
+        deltaE = torch.tensor(deltaE).cpu()
+        print("Delta E:", deltaE)
+        deltaE = np.clip(deltaE, -args.C_v, args.C_v)
+        deltaE_after_dp = 2*args.C_v*args.sigma_v*np.random.normal(0,1)+deltaE
+        print("Delta E after dp:",deltaE_after_dp)
+        # exit()
+        if deltaE_after_dp < args.beta*args.C_v:
+            last_valid_loss = valid_loss_new
+            last_model = copy.deepcopy(model)
+            epsilon_list.append(epsilon)
+            loss_list.append(test_loss)
+            print("accept this round's update, the number of total accepted updates is:", format(t))
+            t += 1
+        else:
+            print("reject this round's update")
+            model.load_state_dict(last_model.state_dict(), strict=True)
+
         iter+=1
 
-model_save_dir = 'fine_tuned_gpt2_' + args.algorithm +'_'+ str(args.bs_valid) + '_' + str(args.epsilon) + '_' + str(args.batch_size) + '_' + str(args.sigma_v)
-model.save_pretrained(model_save_dir)
-tokenizer.save_pretrained(model_save_dir)
+# model_save_dir = 'fine_tuned_gpt2_' + args.algorithm +'_'+ str(args.bs_valid) + '_' + str(args.epsilon) + '_' + str(args.batch_size) + '_' + str(args.sigma_v)
+# model.save_pretrained(model_save_dir)
+# tokenizer.save_pretrained(model_save_dir)
+#
+# print(f"Train Completed, Fine Tuned Model parameters have been stored in {model_save_dir}")
 
-print(f"Train Completed, Fine Tuned Model parameters have been stored in {model_save_dir}")
+timestamp = datetime.now().strftime("%Y.%m%d.%H.%M")
+
+# 3. 生成文件名，例如：DPSUR, eps=1, 2025.0403.22.12.json
+filename = f"{args.algorithm}, eps={args.epsilon}, {timestamp}.json"
+save_path = os.path.join("experiments", filename)
+
+# 4. 准备要保存的实验数据
+experiment_data = {
+    "args": vars(args),  # 所有超参数
+    "epsilon_list": epsilon_list,
+    "loss_list": [float(loss) for loss in loss_list]
+}
+
+# 5. 写入 JSON 文件
+with open(save_path, "w") as f:
+    json.dump(experiment_data, f, indent=4)
+
+print(f"Experiment results saved to {save_path}")
